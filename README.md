@@ -5,7 +5,9 @@
 
 This repository is a fork of [pingdotgg/t3code](https://github.com/pingdotgg/t3code). Upstream T3 Code is an agent-harness control surface that can launch and manage Codex, Claude Code, Cursor, Grok Build, OpenCode, and other coding agents. Upstream also exposes an MCP server for outside agents such as ChatGPT.
 
-The goal of this fork is narrower: make T3 Code an excellent **execution surface for ordinary ChatGPT conversations**.
+The goal of this fork is intentionally narrow: turn T3 Code into a strong **ChatGPT-to-Codex bridge**.
+
+This fork should be thought of primarily as a ChatGPT plugin backed by T3's execution machinery. Preserving the complete general-purpose T3 MCP experience for Claude, other outside agents, or arbitrary MCP clients is not a design requirement. If simplifying the ChatGPT-to-Codex path makes this fork less useful as a generic T3 distribution, that is an acceptable tradeoff.
 
 The intended division of labor is:
 
@@ -33,7 +35,7 @@ project / worktree
 
 ChatGPT should do the expensive conversational work: understanding the request, inspecting the relevant code, finding ambiguities, discussing implementation choices with the user, and producing a complete implementation specification. T3 should provide the durable execution environment. Codex should implement the approved specification.
 
-This fork should remain recognizably T3 Code. It should not replace T3's orchestration architecture or implement another Codex protocol layer.
+This fork should reuse T3's durable thread, worktree, provider, pending-request, and Codex integration machinery rather than implement another Codex protocol layer. Compatibility work that exists only to preserve non-ChatGPT MCP workflows should not be allowed to complicate the primary Chat-to-Codex path.
 
 ## Why optimize for ordinary ChatGPT Chat?
 
@@ -73,23 +75,17 @@ T3 and Codex continue independently. The user can monitor the run in T3 Code. If
 
 There should be no requirement for ChatGPT to poll correctly, remember to issue another wait call, or keep adding filler wait results to the conversation context.
 
-## No `t3_thread_wait` in the ChatGPT-facing profile
+## No `t3_thread_wait` in this fork's MCP surface
 
-The ChatGPT-optimized MCP profile should **not advertise `t3_thread_wait`**.
+This fork should **not advertise `t3_thread_wait` to ChatGPT at all**.
 
-This is stronger than merely instructing ChatGPT not to use it. If a tool is inappropriate for this environment, it should not be in the model's tool surface.
+This is stronger than merely instructing ChatGPT not to use it. If a tool is inappropriate for the intended Chat-to-Codex workflow, it should not be in the model's tool surface.
 
 The reason is reliability. A prompt-level instruction such as "do not call wait" still leaves a contradictory affordance in the model's context. The model can choose to call it anyway, can decide to poll repeatedly, or can make different choices after model updates. Removing the tool eliminates the decision.
 
-The upstream T3 MCP server should remain capable of exposing `t3_thread_wait` to other clients. This fork should add a **named MCP tool profile or per-credential allowlist** so that the same T3 instance can expose a restricted, coherent surface to ordinary ChatGPT without degrading the normal T3 MCP server.
+There is no need to introduce a profile system merely to preserve the broader upstream MCP surface. This fork can directly curate the MCP tools it advertises. If that makes the fork less useful to other MCP clients, that is an accepted consequence of optimizing it specifically as a ChatGPT plugin.
 
-A reasonable profile name would be:
-
-```text
-chatgpt-chat
-```
-
-The filtering should happen on the T3 server side so the unwanted tools never appear in `tools/list`. ChatGPT's own plugin settings can provide an additional layer of filtering, but the desired T3 configuration should not depend on a particular OpenAI UI control remaining available.
+The filtering should happen on the T3 server side so unwanted tools never appear in `tools/list`. ChatGPT's own plugin settings can still provide a second layer of filtering, but correctness should not depend on them.
 
 ## Tool descriptions must remain coherent after filtering
 
@@ -101,9 +97,9 @@ Upstream T3 tool descriptions sometimes reference other T3 tools. For example, t
 
 If `t3_thread_wait` is hidden but that description survives unchanged, the model is still being instructed to use a capability that the profile intentionally removed.
 
-The ChatGPT-optimized profile therefore needs **profile-aware descriptions**, not only a tool allowlist.
+The fork therefore needs **descriptions rewritten for its actual MCP surface**, not merely a reduced tool list.
 
-At minimum, every advertised tool description and every advertised parameter-schema description should be checked for references to tools that are absent from the active profile. The build should ideally contain an invariant test that fails when an advertised description names a T3 tool that the profile does not advertise.
+At minimum, every advertised tool description and every advertised parameter-schema description should be checked for references to tools that this fork does not advertise. The build should ideally contain an invariant test that fails when an advertised description names a T3 tool that is absent from the fork's MCP surface.
 
 Examples of upstream descriptions that should be reconsidered for this profile include:
 
@@ -119,9 +115,9 @@ The intended `orchestrator_capabilities` description should simply explain that 
 
 The desired rule is simple: **the descriptions presented to the model should describe the workflow we actually want the model to perform.**
 
-## Initial ChatGPT-facing tool surface
+## Initial MCP tool surface
 
-The first ChatGPT profile should be intentionally small.
+The fork's MCP surface should be intentionally small and designed around ChatGPT planning and Codex execution.
 
 The expected core tools are approximately:
 
@@ -177,7 +173,7 @@ For ChatGPT to be the planning layer, it needs to understand the repository itse
 
 Project metadata is not enough. ChatGPT should be able to inspect the registered project's actual code without first launching Codex merely to act as its eyes.
 
-The ChatGPT profile should therefore expose a small set of first-class, read-only repository tools. Exact names can change, but the desired capabilities are:
+The fork should therefore expose a small set of first-class, read-only repository tools to ChatGPT. Exact names can change, but the desired capabilities are:
 
 ```text
 t3_project_tree
@@ -285,7 +281,7 @@ The user should remain able to steer a running run through the T3 interface dire
 
 When the target thread is running, T3's existing steering semantics should be used rather than interrupting and restarting unless the user specifically requests a restart.
 
-For provider questions, T3's durable pending-request system should remain the source of truth. The user can answer a Codex question in T3 Code itself. The ChatGPT profile may expose `t3_pending_request` so that, when explicitly asked, ChatGPT can read the pending question, discuss it with the user, and submit the answer.
+For provider questions, T3's durable pending-request system should remain the source of truth. The user can answer a Codex question in T3 Code itself. The fork should expose `t3_pending_request` so that, when explicitly asked, ChatGPT can read the pending question, discuss it with the user, and submit the answer.
 
 The fork should **not** attempt to wake an ordinary ChatGPT conversation automatically when Codex asks a question. That is deliberately outside the first version.
 
@@ -307,15 +303,15 @@ The intended personal workflow should support the following default policy in th
 
 This policy exists because the target projects may be young and implementation approaches may be replaced frequently. Persistent regression tests can become maintenance obligations for implementation details that are intentionally short-lived.
 
-The policy should live in the planning/handoff layer or project configuration rather than being hard-coded as a universal T3 behavior. Other T3 users should be able to choose different testing policies.
+The policy should live in the planning/handoff layer or project configuration rather than being hard-coded into Codex execution itself. This is a personal workflow choice for this fork.
 
-## Preserve model and reasoning selection
+## Preserve Codex model and reasoning selection
 
-The ChatGPT planner should be able to inspect the currently available T3 provider/model catalog and deliberately select the implementation model and supported model options when launching a thread.
+The ChatGPT planner should be able to inspect the currently available Codex models and supported model options and deliberately select the implementation model and reasoning effort when launching a thread.
 
-The fork should not hard-code one Codex model identifier because OpenAI's Codex catalog changes over time. `orchestrator_capabilities` should remain the source of current provider IDs, model IDs, reasoning-effort choices, and compatible runtime modes.
+The fork should not hard-code one Codex model identifier because OpenAI's Codex catalog changes over time. The relevant capability tool should remain the source of current Codex model IDs, reasoning-effort choices, and compatible runtime modes.
 
-The personal default can prefer Codex, but the underlying T3 provider system should remain intact.
+Upstream T3's broader provider architecture may remain internally because it is useful infrastructure, but preserving first-class MCP workflows for non-Codex providers is not a goal of this fork. The external product goal is ChatGPT planning work that is handed to Codex for execution.
 
 ## Desktop UX: keep ChatGPT and T3 visible together
 
@@ -341,17 +337,19 @@ The desired implementation should avoid creating a second orchestration system b
 
 The preferred delta is:
 
-1. A named/per-credential MCP tool profile mechanism.
-2. Profile-aware tool descriptions and schema-description validation.
-3. A small read-only repository-inspection toolkit.
-4. ChatGPT-specific launch/steering workflow guidance.
-5. Optional desktop browser UX improvements if necessary.
+1. Directly curate the MCP tools this fork advertises.
+2. Rewrite their descriptions for the Chat-to-Codex workflow and validate that they do not reference removed tools.
+3. Add a small read-only repository-inspection toolkit.
+4. Add ChatGPT-specific launch/steering workflow guidance.
+5. Make optional desktop browser UX improvements if necessary.
+
+A general-purpose MCP profile system is unnecessary unless implementation work later reveals a concrete reason for one.
 
 Everything else should continue to use upstream T3 services: authentication, provider discovery, thread management, worktrees, persistent thread state, Codex integration, pending requests, model selection, interruption, and steering.
 
 This makes it easier to keep the fork rebased onto upstream T3.
 
-If upstream later gains sufficiently granular MCP profiles and repository-inspection tools, the fork-specific server changes should be removable.
+If upstream later gains repository-inspection tools or other pieces that match this workflow, this fork should reuse them where practical. The fork does not need to preserve architectural symmetry with upstream when doing so would make the Chat-to-Codex path more complicated.
 
 ## Non-goals
 
@@ -364,7 +362,8 @@ This fork is not trying to:
 - Teach ChatGPT to poll `t3_thread_wait` on a timer.
 - Recreate ChatGPT Work in a custom MCP plugin.
 - Automatically wake ordinary ChatGPT on every T3 event.
-- Remove T3's existing tools or providers for non-ChatGPT clients.
+- Preserve the full upstream MCP tool surface for non-ChatGPT clients.
+- Preserve every upstream provider workflow at the ChatGPT plugin boundary.
 - Make every T3 feature available to the planning conversation.
 
 The project should optimize the boundary between a conversational planner and a durable coding harness.
@@ -377,7 +376,7 @@ As of October 2026, OpenAI's documentation says [full custom MCP, including writ
 
 That is an OpenAI product/account limitation, not a T3 limitation.
 
-OpenAI also documents per-app tool management for custom MCP apps. That is useful as a second safety layer, but this fork still wants server-side profiles so the model receives a coherent, minimal tool surface and descriptions that do not refer to hidden tools.
+OpenAI also documents per-app tool management for custom MCP apps. That is useful as a second safety layer, but this fork should still curate its MCP surface server-side so the model receives a coherent, minimal set of tools and descriptions that never refer to tools the fork has intentionally removed.
 
 ## Desired end state
 
