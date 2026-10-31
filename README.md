@@ -1,152 +1,440 @@
-# T3 Code
+# T3 Code — ChatGPT Optimized
 
-T3 Code is an "agent harness control surface". It enables control of the agents on your machine with a best-in-class mobile app ([iOS](https://apps.apple.com/us/app/t3-code-remote-claude-more/id6787819824), [Android](https://play.google.com/store/apps/details?id=com.t3tools.t3code)), [web app](https://app.t3.codes) and [Electron-based desktop app](https://t3.codes).
+> [!IMPORTANT]
+> **Design fork only.** This fork does not yet implement the behavior described below. The purpose of this README is to define the desired changes, constraints, and rationale before code is modified.
 
-Works with your subscriptions on Claude Code, Codex, Cursor, Grok Build, OpenCode, and Google Antigravity. If they're set up on your computer, T3 Code can control them.
+This repository is a fork of [pingdotgg/t3code](https://github.com/pingdotgg/t3code). Upstream T3 Code is an agent-harness control surface that can launch and manage Codex, Claude Code, Cursor, Grok Build, OpenCode, and other coding agents. Upstream also exposes an MCP server for outside agents such as ChatGPT.
 
-## "Wait, what are you selling me?"
+The goal of this fork is narrower: make T3 Code an excellent **execution surface for ordinary ChatGPT conversations**.
 
-Nothing. We built T3 Code because we wanted the best possible development experience with agents. We were inspired by existing solutions like the Codex desktop app, Conductor, Claude Desktop and Cursor Glass, but none met our bar.
+The intended division of labor is:
 
-We wanted something performant, remote-ready, and truly open. If we ever go the wrong direction, we want you to have everything you need to fork and build the editor that you want.
-
-## Installation
-
-> [!WARNING]
-> T3 Code currently supports Codex, Claude, Cursor, Grok Build, OpenCode, and Antigravity. Install and authenticate at least one provider before use:
->
-> - Codex: install [Codex CLI](https://developers.openai.com/codex/cli) and run `codex login`
-> - Claude: install [Claude Code](https://claude.com/product/claude-code) and run `claude auth login`
-> - Cursor: install [Cursor CLI](https://cursor.com/cli) and run `agent login`
-> - Grok Build: install [Grok Build CLI](https://x.ai/cli) and run `grok login`
-> - OpenCode: install [OpenCode](https://opencode.ai) and run `opencode auth login`
-> - Antigravity: enable it in Settings, then use **Install Antigravity** and **Sign in with Google**. No CLI is required.
-
-### Command line
-
-```bash
-curl -fsSL https://t3.codes/install.sh | sh
+```text
+User
+  |
+  v
+ordinary ChatGPT conversation
+(requirements, discussion, repository inspection, implementation planning)
+  |
+  | explicit approved handoff
+  v
+T3 Code MCP
+  |
+  v
+T3 top-level thread
+  |
+  v
+Codex
+(implementation)
+  |
+  v
+project / worktree
 ```
 
-On Windows, in PowerShell:
+ChatGPT should do the expensive conversational work: understanding the request, inspecting the relevant code, finding ambiguities, discussing implementation choices with the user, and producing a complete implementation specification. T3 should provide the durable execution environment. Codex should implement the approved specification.
 
-```powershell
-irm https://t3.codes/install.ps1 | iex
+This fork should remain recognizably T3 Code. It should not replace T3's orchestration architecture or implement another Codex protocol layer.
+
+## Why optimize for ordinary ChatGPT Chat?
+
+This project deliberately targets ordinary ChatGPT conversations rather than assuming ChatGPT Work, Codex Cloud, or a custom Responses API application.
+
+That is a usage and product decision, not a claim that the more agentic OpenAI surfaces are incapable of solving the same problems.
+
+OpenAI currently describes [ChatGPT Work and Codex](https://help.openai.com/en/articles/20001275-chatgpt-work-and-codex) as long-running work surfaces and states that Work follows the same usage structure as Codex. For the intended user of this fork, Codex capacity is comparatively scarce and is consumed quickly. Moving requirements analysis, architecture discussion, repository reading, and handoff preparation into ordinary ChatGPT Chat is therefore advantageous. Codex usage should be spent primarily on implementation.
+
+Similarly, OpenAI's API now supports [asynchronous tool calling](https://developers.openai.com/api/docs/guides/async-tool-calling), and Work can perform longer multi-step work. Those capabilities can support designs in which an agent waits on background work, receives later results, or resumes after a dependency completes. They do not remove the reason for this fork because this fork is intentionally designed around **ordinary ChatGPT plugin/MCP behavior and its usage economics**.
+
+The project should not artificially reproduce Work inside Chat. It should give Chat a small, reliable control surface and let T3 remain the place where long-running coding work lives.
+
+## Important ordinary-Chat constraint: do not depend on long-lived MCP calls
+
+The intended workflow must not require an MCP tool call from ordinary ChatGPT to remain open for the duration of a coding task.
+
+In prior experimentation with a separate Human Tool Call MCP project, the OpenAI MCP host was observed retrying a blocked request at roughly the one-minute mark and cancelling it around the ninety-second mark. Those timings are an empirical observation from that project, not a documented universal OpenAI guarantee, and they may change.
+
+The architectural conclusion is more durable than the exact numbers: **a normal ChatGPT plugin call must be allowed to finish quickly**.
+
+A call such as:
+
+```text
+ChatGPT -> launch Codex -> wait until Codex finishes or asks a question
 ```
 
-Then run `t3` to start the server and open the local web app. `t3 service install` keeps it running in the background, `t3 update` moves to a newer release, and `t3 --help` has the full reference.
+is therefore outside the target design.
 
-To try it once without installing, run `npx t3@latest` instead.
+The target design is:
 
-### Desktop app
-
-Install the latest version of the desktop app from [GitHub Releases](https://github.com/pingdotgg/t3code/releases), or from your favorite package registry:
-
-#### Windows (`winget`)
-
-```bash
-winget install T3Tools.T3Code
+```text
+ChatGPT -> launch Codex -> receive thread/run identifiers -> end the ChatGPT turn
 ```
 
-#### Windows (`scoop`)
+T3 and Codex continue independently. The user can monitor the run in T3 Code. If Codex asks a question, the user can answer it directly in T3. If the user wants ChatGPT's help with the question or wants to steer the run, the user can return to ChatGPT and explicitly ask it to read or message the T3 thread.
 
-```bash
-scoop install extras/t3code
+There should be no requirement for ChatGPT to poll correctly, remember to issue another wait call, or keep adding filler wait results to the conversation context.
+
+## No `t3_thread_wait` in the ChatGPT-facing profile
+
+The ChatGPT-optimized MCP profile should **not advertise `t3_thread_wait`**.
+
+This is stronger than merely instructing ChatGPT not to use it. If a tool is inappropriate for this environment, it should not be in the model's tool surface.
+
+The reason is reliability. A prompt-level instruction such as "do not call wait" still leaves a contradictory affordance in the model's context. The model can choose to call it anyway, can decide to poll repeatedly, or can make different choices after model updates. Removing the tool eliminates the decision.
+
+The upstream T3 MCP server should remain capable of exposing `t3_thread_wait` to other clients. This fork should add a **named MCP tool profile or per-credential allowlist** so that the same T3 instance can expose a restricted, coherent surface to ordinary ChatGPT without degrading the normal T3 MCP server.
+
+A reasonable profile name would be:
+
+```text
+chatgpt-chat
 ```
 
-#### macOS (Homebrew)
+The filtering should happen on the T3 server side so the unwanted tools never appear in `tools/list`. ChatGPT's own plugin settings can provide an additional layer of filtering, but the desired T3 configuration should not depend on a particular OpenAI UI control remaining available.
 
-```bash
-brew install --cask t3-code
+## Tool descriptions must remain coherent after filtering
+
+This requirement is important.
+
+Upstream T3 tool descriptions sometimes reference other T3 tools. For example, the current `t3_thread_launch` description tells the model:
+
+> Follow it with `t3_thread_read` or `t3_thread_wait`.
+
+If `t3_thread_wait` is hidden but that description survives unchanged, the model is still being instructed to use a capability that the profile intentionally removed.
+
+The ChatGPT-optimized profile therefore needs **profile-aware descriptions**, not only a tool allowlist.
+
+At minimum, every advertised tool description and every advertised parameter-schema description should be checked for references to tools that are absent from the active profile. The build should ideally contain an invariant test that fails when an advertised description names a T3 tool that the profile does not advertise.
+
+Examples of upstream descriptions that should be reconsidered for this profile include:
+
+- `t3_thread_launch`, which currently mentions `t3_thread_wait`.
+- `orchestrator_capabilities`, which currently describes its output primarily in terms of `delegate_task`.
+- `t3_thread_interrupt`, which currently tells delegated-task callers to use `task_cancel`.
+
+The intended `t3_thread_launch` description should communicate something closer to:
+
+> Create a new top-level T3 thread and optionally start its first run. Return after the thread is launched. Do not poll or wait for completion. The user monitors long-running work in T3 Code. Read, steer, or interrupt the thread later only when the user explicitly asks.
+
+The intended `orchestrator_capabilities` description should simply explain that it lists providers, models, model options, runtime modes, and interaction modes that can be selected for a T3 thread.
+
+The desired rule is simple: **the descriptions presented to the model should describe the workflow we actually want the model to perform.**
+
+## Initial ChatGPT-facing tool surface
+
+The first ChatGPT profile should be intentionally small.
+
+The expected core tools are approximately:
+
+```text
+orchestrator_capabilities
+
+t3_project_list
+t3_project_read
+
+t3_thread_launch
+t3_thread_list
+t3_thread_read
+t3_thread_send
+t3_thread_interrupt
+t3_pending_request
+t3_thread_configure
+t3_thread_search
 ```
 
-#### Debian, Ubuntu (`.deb`)
+Attachment support is also useful and can remain available if its tool chain is kept coherent:
 
-Download the `.deb` from [GitHub Releases](https://github.com/pingdotgg/t3code/releases), then:
-
-```bash
-sudo apt install ./T3-Code-*.deb
+```text
+t3_attachment_prepare_upload
+t3_attachment_discard
+t3_thread_send_attachments
 ```
 
-#### Arch Linux (AUR)
+The exact allowlist should be decided from actual use rather than by exposing everything preemptively.
 
-Stable:
+Tools for delegation, task polling, scheduling, background waits, environment linking, PR watching, browser automation, HTML rendering, device control, and other unrelated orchestration should initially be absent unless a concrete ChatGPT planning workflow requires them.
 
-```bash
-yay -S t3code-bin
+In particular, the following families are not part of the initial target:
+
+```text
+t3_thread_wait
+t3_background_wait
+
+delegate_task
+task_status
+task_cancel
+
+schedule_task
+list_scheduled_tasks
+delete_scheduled_task
+run_scheduled_task_now
 ```
 
-Nightly:
+This is not a judgment that those tools are bad. They are useful in T3's broader orchestration environment. They increase the action space and create behavior we do not want from the ordinary-Chat planner.
 
-```bash
-yay -S t3code-nightly-bin
+## Add first-class read-only repository inspection
+
+For ChatGPT to be the planning layer, it needs to understand the repository itself.
+
+Project metadata is not enough. ChatGPT should be able to inspect the registered project's actual code without first launching Codex merely to act as its eyes.
+
+The ChatGPT profile should therefore expose a small set of first-class, read-only repository tools. Exact names can change, but the desired capabilities are:
+
+```text
+t3_project_tree
+t3_project_file_read
+t3_project_search
+t3_project_git_status
+t3_project_git_diff
 ```
 
-The AUR packaging is maintained in this repository under [`packaging/aur`](./packaging/aur).
+These should be intentionally narrower than a generic shell tool.
 
-#### Nix (nixpkgs)
+Repository inspection should be restricted to a registered T3 project/workspace. Paths should be normalized and prevented from escaping the project root. File reads and search results should have sensible size limits and pagination. Git status and diff should be read-only. These tools should advertise appropriate MCP read-only/idempotent annotations.
 
-```bash
-nix profile add github:NixOS/nixpkgs/nixos-unstable#t3code
+The point is to let ChatGPT answer questions such as:
+
+- Where is this behavior implemented?
+- What interfaces will this change affect?
+- Does the requested change conflict with existing architecture?
+- Which files actually need to change?
+- What is already modified in the worktree?
+- What would Codex be starting from?
+
+The planner should be grounded in repository reality before it sends a coding task.
+
+## Planning and approval workflow
+
+The ChatGPT-side workflow should favor discussion before execution.
+
+For a substantive implementation request, ChatGPT should inspect the relevant code, identify material ambiguities, discuss implementation choices with the user, and produce a concrete handoff. It should not launch a coding thread merely because the user mentioned a desired feature.
+
+The default should require explicit user approval before a new coding handoff is launched.
+
+A handoff should carry enough context that Codex can execute without reconstructing product decisions. A useful structure is:
+
+```text
+TASK
+One concrete objective.
+
+CURRENT STATE
+Relevant existing behavior and architecture.
+
+REQUIRED CHANGES
+Complete behavioral requirements.
+
+IMPLEMENTATION DECISIONS
+Choices already resolved with the user.
+
+FILES / COMPONENTS IN SCOPE
+Known scope. Necessary adjacent changes are allowed when required.
+
+CONSTRAINTS
+Compatibility requirements, prohibited changes, and project rules.
+
+VALIDATION
+How success should be checked.
+
+TEST POLICY
+What kinds of tests may or may not be added.
+
+AMBIGUITY POLICY
+What Codex should do if repository reality creates a material unresolved decision.
 ```
 
-The package is maintained in [nixpkgs](https://github.com/NixOS/nixpkgs/tree/nixos-unstable/pkgs/by-name/t3/t3code)
-and includes the desktop app (`t3code-desktop`) and the `t3` command.
-See [Nix installation](./docs/user/install.md#nix-nixpkgs) for NixOS configuration and updates.
+The specification sent to Codex should be authoritative for product and architecture decisions already resolved in ChatGPT.
 
-## Some notes
+Codex should not broaden scope or invent a material product/architecture decision that the handoff intentionally left unresolved. If repository reality creates a meaningful contradiction or ambiguity, Codex may stop the affected work and ask the user in T3.
 
-We are very very early in this project. Expect bugs.
+Otherwise it should complete the specification.
 
-We are (mostly) not accepting contributions yet. Small fixes may be considered. Big features will not be.
+## Prefer a fresh top-level T3 thread for substantive handoffs
 
-## Documentation
+The default handoff should create a new top-level T3 thread for a new substantive implementation task.
 
-Full docs live in [docs/](./docs). There's no docs site yet.
+This keeps the implementation agent's working context aligned with the approved specification and reduces stale assumptions from unrelated previous work. It is especially useful in young projects where implementations and architecture change rapidly.
 
-- [FAQ](./docs/user/faq.md)
-- [Install and first run](./docs/user/install.md)
-- [Permission modes](./docs/user/permission-modes.md)
-- [Keyboard shortcuts](./docs/user/keybindings.md)
-- [Project settings](./docs/user/project-settings.md)
-- [Appearance preferences](./docs/user/appearance.md)
-- [Remote access from a phone or another machine](./docs/user/remote-access.md)
-- [Connect Claude Code, Codex, ChatGPT and other agents over MCP](./docs/user/outside-agents.md)
-- [Keeping app and server in sync](./docs/user/updating.md)
-- [Source control integrations](./docs/user/source-control.md)
-- Multiple accounts: [Codex](./docs/user/providers-codex.md) · [Claude](./docs/user/providers-claude.md)
-- [Run T3 Code as a background service](./docs/user/background-service.md)
+Follow-up corrections, steering, or answers to a question can continue in the same T3 thread.
 
-Building from source? Start at [docs/internals/overview.md](./docs/internals/overview.md).
+This is a workflow default, not a hard server restriction. The user should be able to choose an existing thread when continuity is useful.
 
-## If you REALLY want to contribute still.... read this first
+## Launches must be idempotent and return immediately
 
-### Install `vp`
+`t3_thread_launch` already supports a `clientRequestId`. The ChatGPT workflow should use a stable request identifier for a single approved handoff so that a lost MCP response can be retried without accidentally creating duplicate coding threads.
 
-T3 Code uses Vite+ so you'll need to install the global `vp` command-line tool.
+A successful launch should give ChatGPT enough information to report that execution has begun:
 
-#### macOS / Linux
-
-```bash
-curl -fsSL https://vite.plus | bash
+```text
+threadId
+runId
+link
+selected provider/model
+initial status
 ```
 
-#### Windows
+That should be the end of the ChatGPT execution turn unless the user explicitly asked for another immediate action.
 
-```bash
-irm https://vite.plus/ps1 | iex
+There should be no automatic `read -> wait -> read -> wait` loop after launch.
+
+## Steering and mid-work questions
+
+Codex can discover information during implementation that was not visible during planning.
+
+The user should remain able to steer a running run through the T3 interface directly. ChatGPT should also retain `t3_thread_send` so the user can return to the planning conversation and say, for example:
+
+> Tell the coding thread to preserve the old cache format.
+
+When the target thread is running, T3's existing steering semantics should be used rather than interrupting and restarting unless the user specifically requests a restart.
+
+For provider questions, T3's durable pending-request system should remain the source of truth. The user can answer a Codex question in T3 Code itself. The ChatGPT profile may expose `t3_pending_request` so that, when explicitly asked, ChatGPT can read the pending question, discuss it with the user, and submit the answer.
+
+The fork should **not** attempt to wake an ordinary ChatGPT conversation automatically when Codex asks a question. That is deliberately outside the first version.
+
+## No automatic completion wakeups or polling
+
+This fork does not need to implement MCP Events, a webhook callback system, a polling daemon, or a replacement for ChatGPT Work.
+
+When Codex completes, the user can see completion in T3. If the user wants a review in ChatGPT, they can return and ask ChatGPT to read the thread and relevant diff.
+
+This intentionally trades automatic wakeups for predictable usage, simpler state, and fewer model-driven control loops.
+
+If ordinary ChatGPT later gains a reliable asynchronous plugin execution model that fits this usage strategy, the design can be revisited. The T3 execution state should remain durable enough that adding a future notification mechanism does not require changing the coding-agent architecture.
+
+## Default testing policy for coding handoffs
+
+The intended personal workflow should support the following default policy in the ChatGPT-generated handoff:
+
+> Use relevant existing tests when useful. Temporary diagnostic or component-specific tests may be created for ad hoc validation. Do not add new persistent regression, unit, or integration tests to the project's normal test suite unless the handoff explicitly requests them.
+
+This policy exists because the target projects may be young and implementation approaches may be replaced frequently. Persistent regression tests can become maintenance obligations for implementation details that are intentionally short-lived.
+
+The policy should live in the planning/handoff layer or project configuration rather than being hard-coded as a universal T3 behavior. Other T3 users should be able to choose different testing policies.
+
+## Preserve model and reasoning selection
+
+The ChatGPT planner should be able to inspect the currently available T3 provider/model catalog and deliberately select the implementation model and supported model options when launching a thread.
+
+The fork should not hard-code one Codex model identifier because OpenAI's Codex catalog changes over time. `orchestrator_capabilities` should remain the source of current provider IDs, model IDs, reasoning-effort choices, and compatible runtime modes.
+
+The personal default can prefer Codex, but the underlying T3 provider system should remain intact.
+
+## Desktop UX: keep ChatGPT and T3 visible together
+
+T3 Code's desktop app already contains a multi-tab browser surface. This fork should make that useful for the planning/execution workflow.
+
+The desired experience is to keep `chatgpt.com` open beside the active T3 coding thread so the user can discuss the implementation in ChatGPT while watching or steering Codex without constantly switching between T3 and a separate browser window.
+
+If upstream behavior does not already provide it cleanly, useful refinements would include:
+
+- A browser tab that can be pinned or scoped to the environment/workspace rather than disappearing with thread changes.
+- Persistent browser profiles so the ChatGPT login survives normally.
+- A clear human-owned state for a ChatGPT browser tab.
+- Agent browser automation disabled for that tab by default.
+- Easy side-by-side switching between the ChatGPT browser tab, files/diff, and the running coding thread.
+
+The ChatGPT page should be treated as the user's interface, not as another page for Codex to automate.
+
+This desktop convenience is independent from the MCP integration. Failure to embed ChatGPT successfully should not prevent the MCP workflow from working through the user's normal browser.
+
+## Keep the fork delta small
+
+The desired implementation should avoid creating a second orchestration system beside T3.
+
+The preferred delta is:
+
+1. A named/per-credential MCP tool profile mechanism.
+2. Profile-aware tool descriptions and schema-description validation.
+3. A small read-only repository-inspection toolkit.
+4. ChatGPT-specific launch/steering workflow guidance.
+5. Optional desktop browser UX improvements if necessary.
+
+Everything else should continue to use upstream T3 services: authentication, provider discovery, thread management, worktrees, persistent thread state, Codex integration, pending requests, model selection, interruption, and steering.
+
+This makes it easier to keep the fork rebased onto upstream T3.
+
+If upstream later gains sufficiently granular MCP profiles and repository-inspection tools, the fork-specific server changes should be removable.
+
+## Non-goals
+
+This fork is not trying to:
+
+- Reimplement Codex or Codex App Server.
+- Replace T3's provider adapters.
+- Build a general autonomous multi-agent hierarchy for ChatGPT.
+- Keep ordinary ChatGPT MCP calls open for an entire coding run.
+- Teach ChatGPT to poll `t3_thread_wait` on a timer.
+- Recreate ChatGPT Work in a custom MCP plugin.
+- Automatically wake ordinary ChatGPT on every T3 event.
+- Remove T3's existing tools or providers for non-ChatGPT clients.
+- Make every T3 feature available to the planning conversation.
+
+The project should optimize the boundary between a conversational planner and a durable coding harness.
+
+## OpenAI product prerequisites and limitations
+
+The exact ChatGPT custom-MCP product surface changes over time and should be rechecked during implementation.
+
+As of October 2026, OpenAI's documentation says [full custom MCP, including write/modify actions, is available to Business and Enterprise/Edu](https://help.openai.com/en/articles/12584461-connecting-custom-mcp-servers-in-chatgpt), while Pro users can connect custom MCP servers with read/fetch permissions. A ChatGPT account/workspace that cannot invoke write-capable custom MCP tools will be able to inspect T3 but will not be able to launch, steer, or interrupt coding threads from Chat.
+
+That is an OpenAI product/account limitation, not a T3 limitation.
+
+OpenAI also documents per-app tool management for custom MCP apps. That is useful as a second safety layer, but this fork still wants server-side profiles so the model receives a coherent, minimal tool surface and descriptions that do not refer to hidden tools.
+
+## Desired end state
+
+The successful workflow should feel approximately like this:
+
+```text
+User:
+"Change the cache invalidation behavior."
+
+ChatGPT:
+- reads the relevant project files through T3
+- identifies two ambiguous behavioral choices
+- discusses them with the user
+- produces a final implementation specification
+- asks for approval
+
+User:
+"Go ahead."
+
+ChatGPT:
+- resolves the current Codex provider/model/options
+- launches one new T3 thread with the approved handoff
+- returns the T3 thread link
+- ends its turn
+
+Codex in T3:
+- implements the handoff
+- runs appropriate validation
+- asks in T3 only if a material unresolved issue appears
+
+User:
+- watches progress in T3
+- answers Codex directly there when convenient
+
+Later, optionally:
+
+User to ChatGPT:
+"Check what Codex did."
+
+ChatGPT:
+- reads the T3 thread
+- reads the repository diff
+- reviews the result
+- discusses any corrections with the user
+- steers the existing T3 thread only if requested
 ```
 
-Checkout their getting started guide for more information: https://viteplus.dev/guide/
+The key property is that **conversation and implementation can be separated without duplicating the implementation agent or relying on fragile background behavior in ordinary ChatGPT**.
 
-### Install dependencies
+## Upstream T3 documentation
 
-```bash
-vp i
-```
+The original T3 documentation remains relevant and should continue to be treated as the implementation baseline:
 
-Read [CONTRIBUTING.md](./CONTRIBUTING.md) before reporting a bug or opening a PR.
+- [T3 outside-agent / MCP documentation](./docs/user/outside-agents.md)
+- [T3 internals overview](./docs/internals/overview.md)
+- [T3 permission modes](./docs/user/permission-modes.md)
+- [T3 project settings](./docs/user/project-settings.md)
+- [Upstream repository](https://github.com/pingdotgg/t3code)
 
-Have a feature request? Start an [Ideas discussion](https://github.com/pingdotgg/t3code/discussions/categories/ideas).
-
-Need support? Join the [Discord](https://discord.gg/jn4EGJjrvv).
+Until code changes are made, installation and runtime behavior remain those of upstream T3 Code.
